@@ -27,4 +27,5 @@
 art source: https://emojicombos.com/snake-ascii-art
 
 use cargo check to make sure no compile errors
+
 use cargo run to run project
