@@ -25,6 +25,15 @@ enum Direction {
     Right,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum LevelType {
+    Normal,
+    Ghost,
+    MultiFood,
+    Speed,
+}
+
+
 struct Game {
     snake: LinkedList<Point>,
     direction: Direction,
@@ -33,6 +42,9 @@ struct Game {
     game_over: bool,
     last_update: f64,
     update_interval: f64,
+    level: u32,
+    level_type: LevelType,
+    food_items: Vec<Point>, // Multiple food for level 10+
 }
 
 impl Game {
@@ -40,6 +52,10 @@ impl Game {
         let mut snake = LinkedList::new();
         snake.push_back(Point { x: GRID_SIZE / 2, y: GRID_SIZE / 2 });
         let food = Game::spawn_food(&snake);
+        let level = 1;
+        let level_type = Game::get_level_type(level);        
+        let update_interval = 0.15 - (level as f64 - 1.0) * 0.01;
+        let food_items = vec![food];
         Ok(Game {
             snake,
             direction: Direction::Right,
@@ -47,8 +63,20 @@ impl Game {
             score: 0,
             game_over: false,
             last_update: 0.0,
-            update_interval: 0.15, // seconds
+            update_interval,
+            level,
+            level_type,
+            food_items,
         })
+    }
+
+    fn get_level_type(level: u32) -> LevelType {
+        match level {
+            5 => LevelType::Ghost,
+            10 => LevelType::MultiFood,
+            15 => LevelType::Speed,
+            _ => LevelType::Normal,
+        }
     }
 
     fn spawn_food(snake: &LinkedList<Point>) -> Point {
@@ -83,27 +111,84 @@ impl Game {
             Direction::Right => Point { x: head.x + 1, y: head.y },
         };
 
-        // Check wall collision
-        if new_head.x < 0 || new_head.x >= GRID_SIZE || new_head.y < 0 || new_head.y >= GRID_SIZE {
+        // Special Level 5: Ghost mode - can walk through walls
+        let is_ghost_mode = self.level_type == LevelType::Ghost;
+        
+        // Check wall collision (unless ghost mode)
+        if !is_ghost_mode && (new_head.x < 0 || new_head.x >= GRID_SIZE || new_head.y < 0 || new_head.y >= GRID_SIZE) {
             self.game_over = true;
             return;
+        }
+        
+        // Wrap around for ghost mode
+        let mut wrapped_head = new_head;
+        if is_ghost_mode {
+            wrapped_head.x = (wrapped_head.x + GRID_SIZE) % GRID_SIZE;
+            wrapped_head.y = (wrapped_head.y + GRID_SIZE) % GRID_SIZE;
         }
 
         // Check self collision
-        if self.snake.contains(&new_head) {
+        if self.snake.contains(&wrapped_head) {
             self.game_over = true;
             return;
         }
 
-        self.snake.push_front(new_head);
+        self.snake.push_front(wrapped_head);
 
-        // Check food
-        if new_head == self.food {
+        // Check food - check against all food items
+        let mut ate_food = false;
+        for (idx, &food) in self.food_items.iter().enumerate() {
+            if wrapped_head == food {
+                ate_food = true;
+                self.food_items.remove(idx);
+                break;
+            }
+        }
+
+        if ate_food {
             self.score += 1;
-            self.food = Game::spawn_food(&self.snake);
+            
+            // Regenerate food
+            if self.food_items.is_empty() {
+                self.food = Game::spawn_food(&self.snake);
+                self.food_items = vec![self.food];
+                
+                // Level 10: Multi-food mode - spawn multiple food
+                if self.level_type == LevelType::MultiFood {
+                    let num_foods = 1 + (self.level / 5) as usize;
+                    for _ in 1..num_foods {
+                        if let Some(new_food) = self.try_spawn_food(50) {
+                            self.food_items.push(new_food);
+                        }
+                    }
+                }
+            }
+            
+            // Level up at 20 points
+            if self.score % 2 == 0 {
+                self.level += 1;
+                self.level_type = Game::get_level_type(self.level);                
+                self.update_interval = (0.15 - (self.level as f64 - 1.0) * 0.01).max(0.05);
+                if self.level_type == LevelType::Speed {
+                    self.update_interval *= 0.5;
+                }
+            }
         } else {
             self.snake.pop_back();
         }
+    }
+    
+    fn try_spawn_food(&self, max_tries: i32) -> Option<Point> {
+        let mut rng = rand::thread_rng();
+        for _ in 0..max_tries {
+            let x = rng.gen_range(0..GRID_SIZE);
+            let y = rng.gen_range(0..GRID_SIZE);
+            let point = Point { x, y };
+            if !self.snake.contains(&point) && !self.food_items.contains(&point) {
+                return Some(point);
+            }
+        }
+        None
     }
 }
 
@@ -143,7 +228,12 @@ impl event::EventHandler<ggez::GameError> for Game {
     }
 
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
-        let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from_rgb(50, 10, 70)); // Darker purple background
+        let bg_color = if self.level_type != LevelType::Normal {
+            graphics::Color::from_rgb(200, 150, 220) // Light purple for special levels
+        } else {
+            graphics::Color::from_rgb(50, 10, 70) // Darker purple
+        };
+        let mut canvas = graphics::Canvas::from_frame(ctx, bg_color);
 
         // Draw the window border (black)
         let window_border_rect = graphics::Rect::new(0.0, 0.0, SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -155,22 +245,27 @@ impl event::EventHandler<ggez::GameError> for Game {
         )?;
         canvas.draw(&window_border_mesh, graphics::DrawParam::default());
 
-        // Draw the board background (same darker purple)
+        // Draw the board background
         let board_rect = graphics::Rect::new(PADDING, PADDING + 50.0, BOARD_SIZE, BOARD_SIZE);
+        let board_bg = if self.level_type != LevelType::Normal {
+            graphics::Color::from_rgb(200, 150, 220) // Light purple for special
+        } else {
+            graphics::Color::from_rgb(50, 10, 70) // Darker purple
+        };
         let board_mesh = graphics::Mesh::new_rectangle(
             ctx,
             graphics::DrawMode::fill(),
             board_rect,
-            graphics::Color::from_rgb(50, 10, 70), // Same darker purple
+            board_bg,
         )?;
         canvas.draw(&board_mesh, graphics::DrawParam::default());
 
         // Draw the board border (bright green)
         let border_rect = graphics::Rect::new(
-            PADDING - BORDER_WIDTH / 2.0,
-            PADDING + 50.0 - BORDER_WIDTH / 2.0,
-            BOARD_SIZE + BORDER_WIDTH,
-            BOARD_SIZE + BORDER_WIDTH,
+            PADDING,
+            PADDING + 50.0,
+            BOARD_SIZE,
+            BOARD_SIZE,
         );
         let border_mesh = graphics::Mesh::new_rectangle(
             ctx,
@@ -184,7 +279,11 @@ impl event::EventHandler<ggez::GameError> for Game {
         for (i, &segment) in self.snake.iter().enumerate() {
             let x = PADDING + segment.x as f32 * CELL_SIZE + CELL_SIZE / 2.0;
             let y = PADDING + 50.0 + segment.y as f32 * CELL_SIZE + CELL_SIZE / 2.0;
-            let color = if i == 0 { graphics::Color::from_rgb(0, 200, 0) } else { graphics::Color::GREEN }; // Head slightly different
+            let color = if self.level_type != LevelType::Normal {
+                if i == 0 { graphics::Color::from_rgb(100, 20, 150) } else { graphics::Color::from_rgb(50, 10, 70) } // Dark purple for special
+            } else {
+                if i == 0 { graphics::Color::from_rgb(0, 200, 0) } else { graphics::Color::GREEN } // Normal green
+            };
             let circle = graphics::Mesh::new_circle(
                 ctx,
                 graphics::DrawMode::fill(),
@@ -195,59 +294,135 @@ impl event::EventHandler<ggez::GameError> for Game {
             )?;
             canvas.draw(&circle, graphics::DrawParam::default());
 
-            // Tongue for head
+            // Forked tongue and eye for head
             if i == 0 {
-                let tongue_end = match self.direction {
-                    Direction::Up => [x, y - CELL_SIZE / 2.0],
-                    Direction::Down => [x, y + CELL_SIZE / 2.0],
-                    Direction::Left => [x - CELL_SIZE / 2.0, y],
-                    Direction::Right => [x + CELL_SIZE / 2.0, y],
+                let (tongue_main, tongue_fork1, tongue_fork2) = match self.direction {
+                    Direction::Up => (
+                        [x, y - CELL_SIZE / 2.0 - CELL_SIZE / 4.0],
+                        [x - CELL_SIZE / 4.0, y - CELL_SIZE / 2.0 - CELL_SIZE / 3.0],
+                        [x + CELL_SIZE / 4.0, y - CELL_SIZE / 2.0 - CELL_SIZE / 3.0],
+                    ),
+                    Direction::Down => (
+                        [x, y + CELL_SIZE / 2.0 + CELL_SIZE / 4.0],
+                        [x - CELL_SIZE / 4.0, y + CELL_SIZE / 2.0 + CELL_SIZE / 3.0],
+                        [x + CELL_SIZE / 4.0, y + CELL_SIZE / 2.0 + CELL_SIZE / 3.0],
+                    ),
+                    Direction::Left => (
+                        [x - CELL_SIZE / 2.0 - CELL_SIZE / 4.0, y],
+                        [x - CELL_SIZE / 2.0 - CELL_SIZE / 3.0, y - CELL_SIZE / 4.0],
+                        [x - CELL_SIZE / 2.0 - CELL_SIZE / 3.0, y + CELL_SIZE / 4.0],
+                    ),
+                    Direction::Right => (
+                        [x + CELL_SIZE / 2.0 + CELL_SIZE / 4.0, y],
+                        [x + CELL_SIZE / 2.0 + CELL_SIZE / 3.0, y - CELL_SIZE / 4.0],
+                        [x + CELL_SIZE / 2.0 + CELL_SIZE / 3.0, y + CELL_SIZE / 4.0],
+                    ),
                 };
-                let tongue = graphics::Mesh::new_line(
+
+                // Main tongue
+                let tongue_main_line = graphics::Mesh::new_line(
                     ctx,
-                    &[[x, y], tongue_end],
+                    &[[x, y], tongue_main],
                     2.0,
                     graphics::Color::RED,
                 )?;
-                canvas.draw(&tongue, graphics::DrawParam::default());
-                // Eye
+                canvas.draw(&tongue_main_line, graphics::DrawParam::default());
+
+                // Fork 1 (outward)
+                let tongue_fork1_line = graphics::Mesh::new_line(
+                    ctx,
+                    &[tongue_main, tongue_fork1],
+                    2.0,
+                    graphics::Color::RED,
+                )?;
+                canvas.draw(&tongue_fork1_line, graphics::DrawParam::default());
+
+                // Fork 2 (outward)
+                let tongue_fork2_line = graphics::Mesh::new_line(
+                    ctx,
+                    &[tongue_main, tongue_fork2],
+                    2.0,
+                    graphics::Color::RED,
+                )?;
+                canvas.draw(&tongue_fork2_line, graphics::DrawParam::default());
+
+                // Eye (bigger and spaced from tongue)
                 let eye_pos = match self.direction {
-                    Direction::Up => [x + 3.0, y - 3.0],
-                    Direction::Down => [x + 3.0, y + 3.0],
-                    Direction::Left => [x - 3.0, y - 3.0],
-                    Direction::Right => [x + 3.0, y - 3.0],
+                    Direction::Up => [x - 5.0, y - 5.0],
+                    Direction::Down => [x - 5.0, y + 5.0],
+                    Direction::Left => [x - 5.0, y - 5.0],
+                    Direction::Right => [x + 5.0, y - 5.0],
                 };
                 let eye = graphics::Mesh::new_circle(
                     ctx,
                     graphics::DrawMode::fill(),
                     eye_pos,
-                    2.0,
+                    3.5,
                     0.1,
                     graphics::Color::BLACK,
                 )?;
-                canvas.draw(&eye, graphics::DrawParam::default());            }
+                canvas.draw(&eye, graphics::DrawParam::default());
+            }
         }
 
-        // Draw food (avocado shape: pear-like polygon)
-        let food_x = PADDING + self.food.x as f32 * CELL_SIZE + CELL_SIZE / 2.0;
-        let food_y = PADDING + 50.0 + self.food.y as f32 * CELL_SIZE + CELL_SIZE / 2.0;
-        let points = [
-            [food_x, food_y - CELL_SIZE / 2.0], // top narrow
-            [food_x + CELL_SIZE / 8.0, food_y - CELL_SIZE / 4.0],
-            [food_x + CELL_SIZE / 3.0, food_y - CELL_SIZE / 8.0], // wider at middle
-            [food_x + CELL_SIZE / 3.0, food_y + CELL_SIZE / 4.0],
-            [food_x, food_y + CELL_SIZE / 2.0], // bottom point
-            [food_x - CELL_SIZE / 3.0, food_y + CELL_SIZE / 4.0],
-            [food_x - CELL_SIZE / 3.0, food_y - CELL_SIZE / 8.0],
-            [food_x - CELL_SIZE / 8.0, food_y - CELL_SIZE / 4.0],
-        ];
-        let food_mesh = graphics::Mesh::new_polygon(
-            ctx,
-            graphics::DrawMode::fill(),
-            &points,
-            graphics::Color::GREEN,
-        )?;
-        canvas.draw(&food_mesh, graphics::DrawParam::default());
+        // Draw food (avocado shape: two stacked circles with brown border, green interior, brown pit)
+        for &food in &self.food_items {
+            let food_x = PADDING + food.x as f32 * CELL_SIZE + CELL_SIZE / 2.0;
+            let food_y = PADDING + 50.0 + food.y as f32 * CELL_SIZE + CELL_SIZE / 2.0;
+            
+            // Brown outer border (larger circles)
+            let top_brown = graphics::Mesh::new_circle(
+                ctx,
+                graphics::DrawMode::fill(),
+                [food_x, food_y - CELL_SIZE / 6.0],
+                CELL_SIZE / 3.0,
+                0.1,
+                graphics::Color::from_rgb(139, 69, 19), // Brown
+            )?;
+            canvas.draw(&top_brown, graphics::DrawParam::default());
+            
+            let bottom_brown = graphics::Mesh::new_circle(
+                ctx,
+                graphics::DrawMode::fill(),
+                [food_x, food_y + CELL_SIZE / 6.0],
+                CELL_SIZE / 2.3,
+                0.1,
+                graphics::Color::from_rgb(139, 69, 19), // Brown
+            )?;
+            canvas.draw(&bottom_brown, graphics::DrawParam::default());
+            
+            // Green interior
+            let top_green = graphics::Mesh::new_circle(
+                ctx,
+                graphics::DrawMode::fill(),
+                [food_x, food_y - CELL_SIZE / 6.0],
+                CELL_SIZE / 3.5,
+                0.1,
+                graphics::Color::GREEN,
+            )?;
+            canvas.draw(&top_green, graphics::DrawParam::default());
+            
+            let bottom_green = graphics::Mesh::new_circle(
+                ctx,
+                graphics::DrawMode::fill(),
+                [food_x, food_y + CELL_SIZE / 6.0],
+                CELL_SIZE / 2.6,
+                0.1,
+                graphics::Color::GREEN,
+            )?;
+            canvas.draw(&bottom_green, graphics::DrawParam::default());
+            
+            // Brown pit in the center
+            let pit = graphics::Mesh::new_circle(
+                ctx,
+                graphics::DrawMode::fill(),
+                [food_x, food_y],
+                CELL_SIZE / 6.0,
+                0.1,
+                graphics::Color::from_rgb(139, 69, 19), // Brown
+            )?;
+            canvas.draw(&pit, graphics::DrawParam::default());
+        }
 
         // Draw the title
         let title_text = graphics::Text::new("Avo Snek Game");
@@ -260,7 +435,7 @@ impl event::EventHandler<ggez::GameError> for Game {
         );
 
         // Draw score
-        let score_text = graphics::Text::new(format!("Score: {}", self.score));
+        let score_text = graphics::Text::new(format!("Score: {}  Level: {}", self.score, self.level));
         canvas.draw(
             &score_text,
             graphics::DrawParam::default()
@@ -268,6 +443,24 @@ impl event::EventHandler<ggez::GameError> for Game {
                 .color(graphics::Color::WHITE)
                 .scale([1.5, 1.5]),
         );
+
+        // Draw special level indicator
+        if self.level_type != LevelType::Normal && !self.game_over {
+            let level_text = match self.level_type {
+                LevelType::Ghost => "GHOST MODE - Walk Through Walls!",
+                LevelType::MultiFood => "MULTI-FOOD MODE!",
+                LevelType::Speed => "EXTREME SPEED!",
+                LevelType::Normal => "",
+            };
+            let special_text = graphics::Text::new(level_text);
+            canvas.draw(
+                &special_text,
+                graphics::DrawParam::default()
+                    .dest([SCREEN_WIDTH / 2.0 - 100.0, 75.0])
+                    .color(graphics::Color::YELLOW)
+                    .scale([1.0, 1.0]),
+            );
+        }
 
         if self.game_over {
             let game_over_text = graphics::Text::new("Game Over! Press R to Restart");
